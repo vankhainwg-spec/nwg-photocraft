@@ -106,6 +106,39 @@ fn pick_target(doc: &Document, x: i32, y: i32, group: bool, move_auto_select: bo
     Some(if group { top_group(doc, hit) } else { hit })
 }
 
+/// The radius `layer.pickAt` searches, in document pixels, at most (NWG: a click a few screen pixels off a
+/// layer, on a gap in fur or between strokes, still picks it). Keeps the search to a few hundred probes.
+const MAX_PICK_RADIUS: i32 = 64;
+
+/// [`pick_target`] at (x, y), or else, with `radius` ≥ 1, the target nearest to it within `radius` document
+/// pixels (probed on a grid of at most 13 × 13 points, nearest first, so ties go to the closer point).
+fn pick_target_near(doc: &Document, x: i32, y: i32, group: bool, move_auto_select: bool, radius: i32) -> Option<LayerId> {
+    if let Some(t) = pick_target(doc, x, y, group, move_auto_select) {
+        return Some(t);
+    }
+    let radius = radius.clamp(0, MAX_PICK_RADIUS);
+    if radius < 1 {
+        return None;
+    }
+    let step = (radius / 6).max(1);
+    let n = radius / step;
+    let mut offsets: Vec<(i32, i32, i32)> = Vec::new();
+    for j in -n..=n {
+        for i in -n..=n {
+            let (dx, dy) = (i * step, j * step);
+            let d2 = dx * dx + dy * dy;
+            if d2 > 0 && d2 <= radius * radius {
+                offsets.push((d2, dx, dy));
+            }
+        }
+    }
+    offsets.sort_by_key(|o| o.0);
+    offsets.into_iter().find_map(|(_, dx, dy)| match (x.checked_add(dx), y.checked_add(dy)) {
+        (Some(px), Some(py)) => pick_target(doc, px, py, group, move_auto_select),
+        _ => None,
+    })
+}
+
 /// List the hits for a context menu or pick one layer or group. A probe leaves the selection
 /// alone. A replace click on a selected member keeps the full multi-selection for dragging.
 fn pick(s: &mut Session, p: &Value) -> Result<Value> {
@@ -120,7 +153,9 @@ fn pick(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let group = p.get("target").and_then(Value::as_str) == Some("group");
     let move_auto_select = p.get("moveAutoSelect").and_then(Value::as_bool).unwrap_or(false);
-    let Some(target) = pick_target(&doc, x, y, group, move_auto_select) else { return Ok(json!({ "layer": null })) };
+    // NWG: optional `radius` (document pixels) — a miss looks for the nearest layer within it.
+    let radius = p.get("radius").and_then(Value::as_f64).filter(|r| r.is_finite() && *r > 0.0).map_or(0, |r| r.min(f64::from(MAX_PICK_RADIUS)).round() as i32);
+    let Some(target) = pick_target_near(&doc, x, y, group, move_auto_select, radius) else { return Ok(json!({ "layer": null })) };
     if p.get("select").and_then(Value::as_bool).unwrap_or(true) {
         let mode = p.get("mode").and_then(Value::as_str).unwrap_or("replace");
         // Like Photoshop, a plain click on one of several selected layers keeps them all
@@ -268,6 +303,23 @@ mod tests {
         }
         s.execute("select.deselect", json!({})).unwrap();
         (s, ids[0], ids[1])
+    }
+
+    #[test]
+    fn radius_picks_the_nearest_layer_after_a_near_miss() {
+        let (mut s, a, b) = two_squares();
+        let bg = s.active().unwrap().doc.layers[0].id;
+        s.execute("layer.select", json!({"layer": bg.0})).unwrap();
+        s.execute("layer.delete", json!({})).unwrap();
+        // A covers 0..10, B 20..30: (13, 5) is 3 px right of A, (16, 16) is 4 px from B's corner.
+        assert!(s.execute("layer.pickAt", json!({"x": 13, "y": 5, "select": false})).unwrap()["layer"].is_null());
+        assert_eq!(s.execute("layer.pickAt", json!({"x": 13, "y": 5, "select": false, "radius": 4})).unwrap()["layer"], a.0);
+        assert!(s.execute("layer.pickAt", json!({"x": 13, "y": 5, "select": false, "radius": 2})).unwrap()["layer"].is_null());
+        assert_eq!(s.execute("layer.pickAt", json!({"x": 17, "y": 17, "radius": 6, "moveAutoSelect": true})).unwrap()["layer"], b.0);
+        assert_eq!(s.active().unwrap().active_layer, Some(b));
+        // Bad or huge radii are clamped, never a panic.
+        assert!(s.execute("layer.pickAt", json!({"x": 39, "y": 39, "select": false, "radius": -5})).unwrap()["layer"].is_null());
+        assert!(s.execute("layer.pickAt", json!({"x": 13, "y": 5, "select": false, "radius": 1e12})).unwrap()["layer"].is_number());
     }
 
     #[test]

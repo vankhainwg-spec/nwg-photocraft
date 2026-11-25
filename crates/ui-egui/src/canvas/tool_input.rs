@@ -275,6 +275,19 @@ fn note_move_pick(app: &mut PhotocraftApp, active_before: Option<photocraft_doc:
     }
 }
 
+/// NWG: how far off a layer, in screen points, a Move Auto-Select click still picks it.
+const PICK_SLOP_SCREEN_PX: f64 = 6.0;
+
+/// NWG: is document point `p` inside the pixel bounds of a visible selected layer?
+fn inside_selected_layer_box(app: &PhotocraftApp, p: [f64; 2]) -> bool {
+    let Some(st) = app.session.active() else { return false };
+    let (x, y) = (p[0].floor() as i32, p[1].floor() as i32);
+    st.selected_layers()
+        .into_iter()
+        .filter_map(|id| st.doc.layer(id))
+        .any(|l| l.visible && photocraft_engine::layer_multi_cmds::layer_bounds(l).is_some_and(|r| r.contains(x, y)))
+}
+
 /// Handle Move-specific pointer events and report whether the event was consumed. Auto-Select
 /// picks on press so snapping and dragging use the resulting layer selection. When a locked-only
 /// hit starts a marquee, Shift preserves the selection that the marquee adds to.
@@ -309,8 +322,13 @@ fn handle_move_pointer(app: &mut PhotocraftApp, raw: ToolEvent, ev: ToolEvent, t
                 } else {
                     "add"
                 };
-                let probe = app.run("layer.pickAt", json!({"x": x, "y": y, "target": target, "select": false, "moveAutoSelect": move_auto_select}));
-                if probe.as_ref().is_ok_and(|v| v["layer"].is_null()) {
+                // NWG: a click a few screen pixels off a layer (a gap in fur, between strokes) still picks it.
+                let radius = PICK_SLOP_SCREEN_PX / f64::from(app.point_zoom().max(0.01));
+                let probe = app.run("layer.pickAt", json!({"x": x, "y": y, "target": target, "select": false, "moveAutoSelect": move_auto_select, "radius": radius}));
+                // NWG: a miss inside the box of a selected layer keeps it and drags it, as Photoshop does with
+                // the transform box showing, instead of dropping the selection for a marquee.
+                let keeps_selected = probe.as_ref().is_ok_and(|v| v["layer"].is_null()) && !mods.shift && inside_selected_layer_box(app, [x, y]);
+                if probe.as_ref().is_ok_and(|v| v["layer"].is_null()) && !keeps_selected {
                     let empty = crate::move_box::empty_at(app, [x, y]);
                     if empty || move_auto_select {
                         if !empty {
@@ -328,7 +346,7 @@ fn handle_move_pointer(app: &mut PhotocraftApp, raw: ToolEvent, ev: ToolEvent, t
                         crate::move_box::begin(app, [x, y], mods.shift, move_auto_select, move_auto_select && !empty);
                         return true;
                     }
-                } else {
+                } else if !keeps_selected {
                     let locked_hit = !move_auto_select
                         && probe.as_ref().ok().and_then(|v| v["layer"].as_u64()).is_some_and(|id| {
                             app.session.active().is_some_and(|st| {
@@ -339,7 +357,7 @@ fn handle_move_pointer(app: &mut PhotocraftApp, raw: ToolEvent, ev: ToolEvent, t
                         });
                     let before = app.session.active().map(|st| st.selected_layers());
                     let active_before = app.session.active().and_then(|st| st.active_layer);
-                    let _ = app.run("layer.pickAt", json!({"x": x, "y": y, "target": target, "mode": mode, "moveAutoSelect": move_auto_select}));
+                    let _ = app.run("layer.pickAt", json!({"x": x, "y": y, "target": target, "mode": mode, "moveAutoSelect": move_auto_select, "radius": radius}));
                     note_move_pick(app, active_before);
                     if locked_hit {
                         crate::move_box::begin(app, [x, y], mods.shift, false, false);

@@ -31,6 +31,9 @@ mod indexed_presets;
 mod web;
 
 #[cfg(target_arch = "wasm32")]
+mod nwg_bridge;
+
+#[cfg(target_arch = "wasm32")]
 fn main() {
     web::start();
 }

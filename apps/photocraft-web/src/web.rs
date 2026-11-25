@@ -114,6 +114,7 @@ pub fn start() {
                         log::info!("photocraft-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                         app.set_wgpu(rs);
                     }
+                    crate::nwg_bridge::install(cc.egui_ctx.clone());
                     let unsaved = Arc::new(AtomicBool::new(false));
                     guard_unload(unsaved.clone());
                     Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, ui_language: "" }))
@@ -425,6 +426,7 @@ impl eframe::App for WebShell {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::nwg_bridge::serve(&self.app);
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         if !dropped.is_empty() {
             let names: Vec<String> =
