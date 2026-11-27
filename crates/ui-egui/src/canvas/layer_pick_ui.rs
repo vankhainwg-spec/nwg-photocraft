@@ -21,6 +21,12 @@ pub struct LayerMenu {
     /// (layer id, name).
     pub layers: Vec<(u64, String)>,
 }
+/// NWG (Will 27/11): rows under the layer list, so the Move tool's right-click flips the layer
+/// (Ctrl+T works in fullscreen only — Will chose that). (label, menu command id).
+pub const ACTIONS: &[(&str, &str)] = &[
+    ("Flip Horizontal", "edit.transform.flipHorizontal"),
+    ("Flip Vertical", "edit.transform.flipVertical"),
+];
 
 /// Does a right-click with `tool` and `mods` open the layer menu (rather than the tool's own)?
 pub fn is_gesture(tool: Tool, mods: Modifiers) -> bool {
@@ -61,6 +67,31 @@ pub fn choose(app: &mut PhotocraftApp, layer: u64) {
     }
 }
 
+/// NWG: run one of [`ACTIONS`] and close the menu. The flip lands on the active layer when it is
+/// under the pointer and movable; otherwise (none, elsewhere, the background or a position-locked
+/// layer such as the NWG nền) the topmost movable listed layer is selected first.
+pub fn act(app: &mut PhotocraftApp, ctx: &Context, command: &str) {
+    let Some(menu) = app.ui.layer_menu.take() else { return };
+    let movable = |id: u64| {
+        app.session.active().is_some_and(|st| {
+            let lid = photocraft_doc::LayerId(id);
+            !st.doc.is_background(lid) && st.doc.layer(lid).is_some_and(|l| !l.locks.position && !l.locks.all)
+        })
+    };
+    let active = app.session.active().and_then(|st| st.active_layer).map(|l| l.0);
+    let keep = active.is_some_and(|a| menu.layers.iter().any(|(l, _)| *l == a) && movable(a));
+    if let Some((top, _)) = menu.layers.iter().find(|(l, _)| !keep && movable(*l)) {
+        if let Err(e) = app.run("layer.select", json!({"layer": top, "mode": "replace"})) {
+            app.ui.status = e;
+            return;
+        }
+    }
+    if let Err(e) = crate::menus::invoke(app, ctx, command, json!({})) {
+        app.ui.status = e;
+        app.ui.status_error = true;
+    }
+}
+
 fn menu_id() -> egui::Id {
     egui::Id::unique("canvas-layer-menu")
 }
@@ -75,9 +106,10 @@ pub fn show(app: &mut PhotocraftApp, ctx: &Context) {
     let active = app.session.active().and_then(|st| st.active_layer).map(|l| l.0);
     let id = menu_id();
     let screen = ctx.content_rect();
-    let size = ctx.memory(|m| m.area_rect(id)).map_or(egui::vec2(200.0, 24.0 * menu.layers.len() as f32 + 12.0), |r| r.size());
+    let size = ctx.memory(|m| m.area_rect(id)).map_or(egui::vec2(200.0, 24.0 * (menu.layers.len() + ACTIONS.len()) as f32 + 20.0), |r| r.size());
     let pos = egui::pos2(menu.pos[0].min(screen.right() - size.x).max(screen.left()), menu.pos[1].min(screen.bottom() - size.y).max(screen.top()));
     let mut chosen = None;
+    let mut action = None;
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::menu(ui.style()).show(ui, |ui| {
             // As wide as the longest name (long names are cut short), like a menu.
@@ -96,10 +128,21 @@ pub fn show(app: &mut PhotocraftApp, ctx: &Context) {
                     }
                 }
             });
+            ui.separator();
+            for (label, command) in ACTIONS {
+                let b = egui::Button::new(*label).min_size(egui::vec2(w, 22.0));
+                if ui.add(b).clicked() {
+                    action = Some(*command);
+                }
+            }
         });
     });
     if let Some(layer) = chosen {
         choose(app, layer);
+        return;
+    }
+    if let Some(command) = action {
+        act(app, ctx, command);
         return;
     }
     if crate::canvas_popup::outside_pressed(ctx, id, area.response.rect) {
@@ -148,6 +191,31 @@ mod tests {
         choose(&mut a, red);
         assert_eq!(a.session.active().unwrap().active_layer.unwrap().0, red);
         assert!(a.ui.layer_menu.is_none());
+    }
+
+    /// NWG (Will 27/11): the Move tool's right-click menu flips the right-clicked layer.
+    #[test]
+    fn menu_flip_horizontal_flips_the_layer_under_the_pointer() {
+        let (mut a, bg, _, _) = app();
+        a.run("layer.select", json!({"layer": bg, "mode": "replace"})).unwrap();
+        a.run("layer.new.layer", json!({"name": "Left"})).unwrap();
+        let left = a.session.active().unwrap().active_layer.unwrap().0;
+        a.run("select.rect", json!({"x": 10, "y": 10, "width": 30, "height": 30})).unwrap();
+        a.run("edit.fill", json!({"color": "#00ff00"})).unwrap();
+        a.run("select.rect", json!({"x": 40, "y": 10, "width": 30, "height": 10})).unwrap();
+        a.run("edit.fill", json!({"color": "#00ff00"})).unwrap();
+        a.run("select.deselect", json!({})).unwrap();
+        a.run("layer.select", json!({"layer": bg, "mode": "replace"})).unwrap();
+        assert!(layers_at(&mut a, 55.0, 30.0).iter().all(|l| l.0 != left), "before: empty under the bar");
+        let ctx = Context::default();
+        assert!(open(&mut a, &ctx, [10.0, 10.0], 20.0, 20.0));
+        assert_eq!(a.ui.layer_menu.as_ref().unwrap().layers.first().map(|l| l.0), Some(left));
+        act(&mut a, &ctx, "edit.transform.flipHorizontal");
+        assert!(a.ui.layer_menu.is_none());
+        assert_eq!(a.session.active().unwrap().active_layer.unwrap().0, left, "the right-clicked layer is selected first");
+        // Flipped about the content's centre (as Photoshop): the square goes right, the bar left.
+        assert!(layers_at(&mut a, 55.0, 30.0).iter().any(|l| l.0 == left), "the square is now on the right");
+        assert!(layers_at(&mut a, 20.0, 30.0).iter().all(|l| l.0 != left), "and left the left side");
     }
 
     #[test]

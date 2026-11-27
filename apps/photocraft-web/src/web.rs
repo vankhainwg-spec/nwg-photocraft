@@ -426,7 +426,7 @@ impl eframe::App for WebShell {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        crate::nwg_bridge::serve(&self.app);
+        crate::nwg_bridge::serve(&mut self.app);
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         if !dropped.is_empty() {
             let names: Vec<String> =
