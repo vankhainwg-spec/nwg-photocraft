@@ -422,6 +422,36 @@ fn transform_presets_are_exact() {
     assert_eq!(pixel(&s, 10, 10), vec![0.0, 1.0, 0.0, 1.0]);
 }
 
+/// With several layers selected, Flip and Rotate turn them as one about the box framing them
+/// all, as in Photoshop, in one history step; a named `layer` still turns alone.
+#[test]
+fn transform_presets_turn_several_selected_layers_about_their_joint_box() {
+    let mut s = session(8);
+    let a = s.active().unwrap().active_layer.unwrap();
+    paint_square(&mut s, Rect::new(2, 5, 6, 9), [1.0, 0.0, 0.0, 1.0]);
+    let b = LayerId(s.execute("layer.new.layer", json!({})).unwrap()["layer"].as_u64().unwrap());
+    paint_square(&mut s, Rect::new(20, 10, 30, 12), [0.0, 0.0, 1.0, 1.0]);
+    s.execute("layer.select", json!({"layer": a.0, "mode": "add"})).unwrap();
+    let bounds = |s: &Session, id: LayerId| doc(s).layer(id).unwrap().surface().unwrap().content_bounds();
+    let past = s.active().unwrap().history.past_len();
+    // The joint box is x 2..30: mirrored across x = 16, each layer lands on the other side.
+    s.execute("edit.transform.flipHorizontal", json!({})).unwrap();
+    assert_eq!(bounds(&s, a), Rect::new(26, 5, 30, 9));
+    assert_eq!(bounds(&s, b), Rect::new(2, 10, 12, 12));
+    assert_eq!(s.active().unwrap().history.past_len(), past + 1, "one undo step");
+    assert_eq!(s.active().unwrap().selected_layers().len(), 2, "both stay selected");
+    // Vertically, the box is y 5..12.
+    s.execute("edit.transform.flipVertical", json!({})).unwrap();
+    assert_eq!(bounds(&s, a), Rect::new(26, 8, 30, 12));
+    assert_eq!(bounds(&s, b), Rect::new(2, 5, 12, 7));
+    s.undo();
+    s.undo();
+    assert_eq!((bounds(&s, a), bounds(&s, b)), (Rect::new(2, 5, 6, 9), Rect::new(20, 10, 30, 12)));
+    // A named layer turns alone, about its own box.
+    s.execute("edit.transform.flipHorizontal", json!({"layer": b.0})).unwrap();
+    assert_eq!((bounds(&s, a), bounds(&s, b)), (Rect::new(2, 5, 6, 9), Rect::new(20, 10, 30, 12)));
+}
+
 /// #6928: with a selection, the presets flip and turn about the selection's own bounds, as
 /// in Photoshop: Select All mirrors across the canvas, a marquee across its own centre.
 /// Without a selection they keep turning about the content (above).
