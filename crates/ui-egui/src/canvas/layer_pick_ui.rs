@@ -78,8 +78,10 @@ pub fn act(app: &mut PhotocraftApp, ctx: &Context, command: &str) {
             !st.doc.is_background(lid) && st.doc.layer(lid).is_some_and(|l| !l.locks.position && !l.locks.all)
         })
     };
-    let active = app.session.active().and_then(|st| st.active_layer).map(|l| l.0);
-    let keep = active.is_some_and(|a| menu.layers.iter().any(|(l, _)| *l == a) && movable(a));
+    // Right-clicking one of the selected layers keeps the whole selection, so Flip turns them all
+    // about their joint box, as in Photoshop (NWG, Will 28/11); another layer is selected alone.
+    let selected = |id: u64| app.session.active().is_some_and(|st| st.is_layer_selected(photocraft_doc::LayerId(id)));
+    let keep = menu.layers.iter().any(|(l, _)| selected(*l) && movable(*l));
     if let Some((top, _)) = menu.layers.iter().find(|(l, _)| !keep && movable(*l)) {
         if let Err(e) = app.run("layer.select", json!({"layer": top, "mode": "replace"})) {
             app.ui.status = e;
@@ -216,6 +218,34 @@ mod tests {
         // Flipped about the content's centre (as Photoshop): the square goes right, the bar left.
         assert!(layers_at(&mut a, 55.0, 30.0).iter().any(|l| l.0 == left), "the square is now on the right");
         assert!(layers_at(&mut a, 20.0, 30.0).iter().all(|l| l.0 != left), "and left the left side");
+    }
+
+    /// NWG (Will 28/11): with several layers selected, the right-click Flip keeps them all and
+    /// mirrors them about the box framing them together, as Photoshop does.
+    #[test]
+    fn menu_flip_horizontal_flips_every_selected_layer_about_their_joint_box() {
+        let (mut a, bg, _, _) = app();
+        let square = |a: &mut PhotocraftApp, name: &str, x: i32| {
+            a.run("layer.select", json!({"layer": bg, "mode": "replace"})).unwrap();
+            a.run("layer.new.layer", json!({"name": name})).unwrap();
+            a.run("select.rect", json!({"x": x, "y": 10, "width": 20, "height": 20})).unwrap();
+            a.run("edit.fill", json!({"color": "#00ff00"})).unwrap();
+            a.run("select.deselect", json!({})).unwrap();
+            a.session.active().unwrap().active_layer.unwrap()
+        };
+        let left = square(&mut a, "Left", 0);
+        let right = square(&mut a, "Right", 30);
+        a.run("layer.select", json!({"layer": left.0, "mode": "add"})).unwrap();
+        let ctx = Context::default();
+        // Right-click on Right, the selected layer that isn't the active one.
+        assert!(open(&mut a, &ctx, [0.0, 0.0], 40.0, 20.0));
+        act(&mut a, &ctx, "edit.transform.flipHorizontal");
+        assert_eq!(a.ui.status, "");
+        let st = a.session.active().unwrap();
+        assert_eq!(st.selected_layers().len(), 2, "both stay selected");
+        let b = |id| photocraft_engine::transform_cmds::transform_bounds(&st.doc, st.doc.layer(id).unwrap());
+        // The joint box is x 0..50: Left lands at 30..50 and Right at 0..20.
+        assert_eq!((b(left).x0, b(left).x1, b(right).x0, b(right).x1), (30, 50, 0, 20));
     }
 
     #[test]

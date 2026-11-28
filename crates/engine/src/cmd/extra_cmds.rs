@@ -294,6 +294,16 @@ fn targeted_vector_mask(s: &Session, p: &Value) -> Result<Option<(LayerId, [f64;
     Ok(Some((id, [x0, y0, x1, y1])))
 }
 
+/// The layers a preset turns together when several are selected in the Layers panel and no
+/// `layer` is named: what `edit.transform` without `layer` moves (linked layers included).
+fn several_targets(d: &crate::DocState, p: &Value) -> Option<Vec<LayerId>> {
+    if !matches!(p.get("layer"), None | Some(Value::Null)) {
+        return None;
+    }
+    let ids = crate::transform_cmds::selection_targets(d);
+    (ids.len() > 1).then(|| crate::transform_cmds::box_targets(&d.doc, &ids))
+}
+
 /// Flips and turns about the centre of the box Free Transform would open: with a selection
 /// limiting the transform it is the selection's own bounds, as in Photoshop, so Select All
 /// mirrors across the canvas (#6928); otherwise the content's bounds.
@@ -316,11 +326,16 @@ fn transform_preset(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {
     // A targeted alpha channel, the Quick Mask or an unlinked layer mask turns by itself (#2835).
     let (b, mut params) = match crate::transform_cmds::lone_target(&d.doc, d.active_layer, p)? {
         Some(surf) => (crate::transform_cmds::target_frame(&d.doc, surf), json!({"target": p.get("target")})),
-        None => {
-            let id = d.active_layer.ok_or(EngineError::Other("no active layer".into()))?;
-            let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
-            (crate::transform_cmds::transform_frame(&d.doc, l), json!({"layer": id.0}))
-        }
+        None => match several_targets(d, p) {
+            // Several layers selected: one flip about the box framing them all, as Photoshop
+            // does, and `edit.transform` without `layer` moves the whole selection in one step.
+            Some(ids) => (crate::transform_cmds::transform_frame_of(&d.doc, &ids), json!({})),
+            None => {
+                let id = d.active_layer.ok_or(EngineError::Other("no active layer".into()))?;
+                let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+                (crate::transform_cmds::transform_frame(&d.doc, l), json!({"layer": id.0}))
+            }
+        },
     };
     if b.is_empty() {
         return Err(EngineError::Other("nothing to transform".into()));
