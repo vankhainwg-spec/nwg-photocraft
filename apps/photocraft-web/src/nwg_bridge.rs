@@ -12,6 +12,11 @@
 //! layer with the same name, so the Mac still finds it by `#id` when it composes the saved file.
 //! Resolves `{doi, loi}` (layers converted, problems). `__nwgXuatOra` also returns `chu`: the same specs
 //! read back from the document's type layers, so the page can keep them in the saved file.
+//!
+//! NWG (Will 28/11, camp Bông rK87d1Ej: names run bottom-to-top): a spec may also carry `goc` (degrees,
+//! clockwise, as Free Transform's `rotate`) and `tracking` (1/1000 em). With `goc`, `x, y` is the ink
+//! centre of the rotated layer: the layer is created, turned about its centre, then moved so its ink
+//! centre lands there. `text_specs` reads `goc` back from the layer's transform the same way.
 
 use std::cell::RefCell;
 
@@ -81,7 +86,23 @@ pub(crate) fn create_params(spec: &serde_json::Value, families: &[String], name:
     if let Some(l) = num("leading_pt").filter(|v| *v > 0.0) {
         p["leading"] = json!(l);
     }
+    if let Some(t) = num("tracking").filter(|v| *v != 0.0) {
+        p["tracking"] = json!(t.clamp(-1000.0, 10000.0));
+    }
     Ok(p)
+}
+
+/// The spec's rotation in degrees (clockwise), when it is a real turn.
+fn spec_angle(spec: &serde_json::Value) -> Option<f64> {
+    spec.get("goc").and_then(serde_json::Value::as_f64).filter(|g| g.is_finite() && g.abs() >= 0.05)
+}
+
+/// Ink box of a type layer in document pixels: (x0, y0, x1, y1).
+fn ink_box(app: &photocraft_ui_egui::PhotocraftApp, id: u64) -> Option<(f64, f64, f64, f64)> {
+    let st = app.session.active()?;
+    let photocraft_doc::LayerContent::Text(t) = &st.doc.layer(photocraft_doc::LayerId(id))?.content else { return None };
+    let b = t.cache.as_ref()?.content_bounds();
+    (b.x1 > b.x0 && b.y1 > b.y0).then(|| (f64::from(b.x0), f64::from(b.y0), f64::from(b.x1), f64::from(b.y1)))
 }
 
 /// The document's layers whose name ends with ` #<id>`: (layer id, name), first match.
@@ -113,11 +134,21 @@ fn convert(app: &mut photocraft_ui_egui::PhotocraftApp, files: Vec<Vec<u8>>, spe
             app.run("layer.select", json!({"layer": raster, "mode": "replace"}))?;
             let visible = app.session.active().and_then(|st| st.doc.layer(photocraft_doc::LayerId(raster))).is_none_or(|l| l.visible);
             let want_x = p["x"].as_f64().unwrap_or_default();
+            let want_y = p["y"].as_f64().unwrap_or_default();
             let made = app.run("type.create", p)?;
             let id = made["layer"].as_u64().ok_or("type.create returned no layer")?;
-            // The engine centres the unscaled line, so a horizontal scale shifts the ink: the spec's
-            // x is the ink centre, so move the new layer until its ink is centred there.
-            if let Some(b) = made["bounds"].as_array().filter(|b| b.len() == 4) {
+            if let Some(goc) = spec_angle(spec) {
+                // Turned text (camp Bông names): rotate about the layer's centre, then put its ink centre on (x, y).
+                app.run("edit.transform", json!({"layer": id, "rotate": goc, "reference": "center"}))?;
+                if let Some((x0, y0, x1, y1)) = ink_box(app, id) {
+                    let (dx, dy) = (want_x - (x0 + x1) / 2.0, want_y - (y0 + y1) / 2.0);
+                    if dx.abs() >= 0.5 || dy.abs() >= 0.5 {
+                        app.run("layer.translate", json!({"dx": dx, "dy": dy}))?;
+                    }
+                }
+            } else if let Some(b) = made["bounds"].as_array().filter(|b| b.len() == 4) {
+                // The engine centres the unscaled line, so a horizontal scale shifts the ink: the spec's
+                // x is the ink centre, so move the new layer until its ink is centred there.
                 let mid = (b[0].as_f64().unwrap_or_default() + b[2].as_f64().unwrap_or_default()) / 2.0;
                 if (want_x - mid).abs() >= 0.5 {
                     app.run("layer.translate", json!({"dx": want_x - mid, "dy": 0.0}))?;
@@ -153,13 +184,24 @@ pub(crate) fn text_specs(doc: &photocraft_doc::Document) -> serde_json::Value {
             let tag = l.name.rsplit_once(" #").map(|(_, t)| t.to_string())?;
             let run = t.char_runs().into_iter().next().map(|r| r.style);
             let c = t.color.to_rgb();
+            let m = t.transform.m;
+            let goc = m[1].atan2(m[0]).to_degrees();
+            let ink = t.cache.as_ref().map(|c| c.content_bounds()).filter(|b| b.x1 > b.x0 && b.y1 > b.y0);
+            if goc.abs() >= 0.05 {
+                // Turned layer: x, y = ink centre, plus the angle (see the module doc).
+                let (x, y) = ink.map_or((m[4], m[5]), |b| ((f64::from(b.x0) + f64::from(b.x1)) / 2.0, (f64::from(b.y0) + f64::from(b.y1)) / 2.0));
+                return Some(json!({"id": tag, "chu": t.text.replace('\r', "\n"), "font": t.font_family, "size_pt": t.size_pt,
+                    "mau": [(c[0] * 255.0).round(), (c[1] * 255.0).round(), (c[2] * 255.0).round()], "x": x, "y": y, "goc": (goc * 100.0).round() / 100.0,
+                    "h_scale": run.as_ref().map_or(100.0, |r| r.horizontal_scale * 100.0), "v_scale": run.as_ref().map_or(100.0, |r| r.vertical_scale * 100.0),
+                    "leading_pt": run.as_ref().and_then(|r| r.leading_pt), "tracking": run.as_ref().map(|r| r.tracking)}));
+            }
             Some(json!({"id": tag, "chu": t.text.replace('\r', "\n"), "font": t.font_family, "size_pt": t.size_pt,
                 "mau": [(c[0] * 255.0).round(), (c[1] * 255.0).round(), (c[2] * 255.0).round()],
                 // x = ink centre (what create_params + the recentring above expect); y = baseline.
                 "x": t.cache.as_ref().map(|c| c.content_bounds()).filter(|b| b.x1 > b.x0).map_or(t.transform.m[4], |b| (f64::from(b.x0) + f64::from(b.x1)) / 2.0), "y": t.transform.m[5],
                 // The engine stores scales as fractions (0.8); the spec carries percent (80).
                 "h_scale": run.as_ref().map_or(100.0, |r| r.horizontal_scale * 100.0), "v_scale": run.as_ref().map_or(100.0, |r| r.vertical_scale * 100.0),
-                "leading_pt": run.as_ref().and_then(|r| r.leading_pt)}))
+                "leading_pt": run.as_ref().and_then(|r| r.leading_pt), "tracking": run.as_ref().map(|r| r.tracking)}))
         })
         .collect();
     serde_json::Value::Array(out)
